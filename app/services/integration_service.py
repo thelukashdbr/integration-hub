@@ -47,7 +47,18 @@ def update_integration(
     db: Session, integration_id: uuid.UUID, data: IntegrationUpdate
 ) -> Integration:
     integration = get_integration(db, integration_id)
-    for field, value in data.model_dump(exclude_unset=True).items():
+    updates = data.model_dump(exclude_unset=True)
+
+    # The stored credential only makes sense for the auth type it was created for.
+    # Refusing is safer than silently discarding a secret.
+    if (
+        "auth_type" in updates
+        and updates["auth_type"] != integration.auth_type
+        and integration.credential is not None
+    ):
+        raise ConflictError("Delete the integration's credential before changing auth_type")
+
+    for field, value in updates.items():
         setattr(integration, field, value)
     _commit_or_conflict(db, integration.name)
     db.refresh(integration)

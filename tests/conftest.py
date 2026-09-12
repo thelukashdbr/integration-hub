@@ -14,7 +14,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.core.config import get_settings  # noqa: E402
-from app.db.session import Base, engine  # noqa: E402
+from app.db.session import Base, SessionLocal, engine  # noqa: E402
 from app.main import app  # noqa: E402
 
 
@@ -43,3 +43,25 @@ def client() -> TestClient:
 @pytest.fixture
 def anonymous_client() -> TestClient:
     return TestClient(app)
+
+
+@pytest.fixture
+def db():
+    """Direct database access for asserting on what was actually stored."""
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+@pytest.fixture
+def integration(client) -> dict:
+    return client.post(
+        "/integrations",
+        json={
+            "name": "Payments API",
+            "base_url": "https://payments.example.com",
+            "auth_type": "API_KEY",
+        },
+    ).json()

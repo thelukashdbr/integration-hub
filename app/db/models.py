@@ -2,9 +2,9 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, String, Text, Uuid, func
+from sqlalchemy import DateTime, Enum, ForeignKey, LargeBinary, String, Text, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
 
@@ -52,3 +52,35 @@ class Integration(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    credential: Mapped["Credential | None"] = relationship(
+        back_populates="integration", cascade="all, delete-orphan"
+    )
+
+
+class Credential(Base):
+    """Authentication settings for one integration. The shape of `config` and of the
+    encrypted secret depends on the integration's auth_type (see schemas/credential.py)."""
+
+    __tablename__ = "credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    integration_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("integrations.id", ondelete="CASCADE"), unique=True
+    )
+
+    # Non-secret settings, safe to return from the API (e.g. the API key header name).
+    config: Mapped[dict[str, str]] = mapped_column(JSONB, default=dict)
+    # Fernet-encrypted JSON with the secret fields. Only decrypted to build a request.
+    encrypted_secret: Mapped[bytes] = mapped_column(LargeBinary)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    integration: Mapped[Integration] = relationship(back_populates="credential")
+
+    @property
+    def auth_type(self) -> AuthType:
+        return self.integration.auth_type
