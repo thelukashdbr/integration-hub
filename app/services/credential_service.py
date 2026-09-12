@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def set_credential(
-    db: Session, integration_id: uuid.UUID, data: CredentialIn
+    db: Session, ref: uuid.UUID | str, data: CredentialIn
 ) -> tuple[Credential, bool]:
     """Create or replace the integration's credential. Returns (credential, created)."""
-    integration = get_integration(db, integration_id)
+    integration = get_integration(db, ref)
 
     if integration.auth_type == AuthType.NONE:
         raise ConflictError("Integration does not use authentication (auth_type is NONE)")
@@ -45,20 +45,22 @@ def set_credential(
     logger.info(
         "credential %s",
         "created" if created else "replaced",
-        extra={"integration_id": str(integration_id), "auth_type": integration.auth_type.value},
+        extra={"integration_id": str(integration.id), "auth_type": integration.auth_type.value},
     )
     return credential, created
 
 
-def get_credential(db: Session, integration_id: uuid.UUID) -> Credential:
-    credential = get_integration(db, integration_id).credential
+def get_credential(db: Session, ref: uuid.UUID | str) -> Credential:
+    credential = get_integration(db, ref).credential
     if credential is None:
-        raise NotFoundError("Credential for integration", integration_id)
+        raise NotFoundError("Credential for integration", ref)
     return credential
 
 
-def delete_credential(db: Session, integration_id: uuid.UUID) -> None:
-    db.delete(get_credential(db, integration_id))
+def delete_credential(db: Session, ref: uuid.UUID | str) -> None:
+    credential = get_credential(db, ref)
+    integration_id = credential.integration_id
+    db.delete(credential)
     db.commit()
     logger.info("credential deleted", extra={"integration_id": str(integration_id)})
 

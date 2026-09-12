@@ -33,6 +33,8 @@ class Integration(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), unique=True)
+    # Human-friendly identifier usable in URLs instead of the UUID (e.g. "payments-api").
+    slug: Mapped[str] = mapped_column(String(100), unique=True)
     description: Mapped[str | None] = mapped_column(Text)
 
     base_url: Mapped[str] = mapped_column(String(2048))

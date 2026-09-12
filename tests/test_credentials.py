@@ -99,6 +99,16 @@ def test_get_credential_before_it_is_set_returns_404(client, integration):
     assert client.get(url(integration)).status_code == 404
 
 
+def test_credential_routes_accept_slug(client, integration):
+    response = client.put(
+        f"/integrations/{integration['slug']}/credential", json=API_KEY_CREDENTIAL
+    )
+
+    assert response.status_code == 201
+    assert response.json()["integration_id"] == integration["id"]
+    assert client.get(f"/integrations/{integration['slug']}/credential").status_code == 200
+
+
 def test_delete_credential(client, integration):
     client.put(url(integration), json=API_KEY_CREDENTIAL)
 

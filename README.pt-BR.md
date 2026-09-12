@@ -13,7 +13,7 @@ Ele modela o dia a dia de um Integration / API Support Engineer: credenciais que
 O conceito central é uma **Integration**: uma API externa com a qual o hub sabe conversar. Cada integração tem no máximo uma **Credential**, que guarda o segredo necessário para autenticar naquela API.
 
 ```
-Integration        (name, base_url, auth_type, default_headers, timeout_seconds, status)
+Integration        (name, slug, base_url, auth_type, default_headers, timeout_seconds, status)
   └── Credential   (API_KEY | BEARER_TOKEN; config em JSONB puro, segredo criptografado com Fernet)
 ```
 
@@ -53,13 +53,16 @@ integration-hub/
 
 **Status do operador vs. saúde observada.** O `Integration.status` (`ACTIVE`/`PAUSED`) é definido por um operador e nunca é alterado pelo sistema. Resultados de health check vão viver em campos próprios quando essa funcionalidade entrar, para que "alguém pausou isso" e "a última checagem falhou" continuem distinguíveis.
 
+**Integrações são endereçáveis por slug, não só por UUID.** Toda rota `/integrations/{ref}` aceita o id ou o slug (`GET /integrations/payments-api`). O slug é derivado do nome na criação quando não é informado (`"Integração ERP (v2)"` → `integracao-erp-v2`), precisa casar com `^[a-z0-9]+(-[a-z0-9]+)*$` e é único. O UUID continua sendo a chave canônica para foreign keys e logs; o slug existe para uma pessoa conseguir digitar.
+
 **Enums são armazenados como `VARCHAR`, não como tipos `ENUM` nativos do Postgres.** Adicionar um valor (um `auth_type` novo, por exemplo) não precisa de migration com `ALTER TYPE`, e os valores permitidos já são garantidos pelo Pydantic na borda da API.
 
 **A própria API do hub exige uma chave.** Toda rota exceto `/health` exige um header `X-API-Key` igual ao `HUB_API_KEY`, comparado em tempo constante. Um serviço que guarda credenciais e vai executar requisições com elas não deveria ficar aberto, nem em um MVP.
 
 ## Funcionalidades (atuais)
 
-- Criar, listar (paginado, filtrável por status), consultar, atualizar e remover integrações
+- Criar, listar (paginado, com busca por nome e filtro por status), consultar, atualizar e remover integrações
+- Endereçar uma integração por um `slug` legível, além do UUID
 - Validar e normalizar a `base_url` (só http/https, sem query string ou fragment, host em minúsculas, sem barra final)
 - Rejeitar `Authorization` em `default_headers` — esse header pertence à credencial
 - Guardar uma credencial por integração (`API_KEY` ou `BEARER_TOKEN`), criptografada em repouso, nunca retornada nem logada
@@ -143,13 +146,15 @@ OpenAPI/Swagger completo em `/docs`. Resumo:
 | Método | Rota                                    | Descrição                                                   |
 |--------|-----------------------------------------|-------------------------------------------------------------|
 | POST   | `/integrations`                         | Cria uma integração                                         |
-| GET    | `/integrations`                         | Lista integrações, **paginada**, `?status=` opcional        |
-| GET    | `/integrations/{id}`                    | Consulta uma integração                                     |
-| PATCH  | `/integrations/{id}`                    | Atualização parcial (qualquer campo, inclusive `status`)    |
-| DELETE | `/integrations/{id}`                    | Remove a integração e a credencial dela                     |
-| PUT    | `/integrations/{id}/credential`         | Cria (`201`) ou substitui (`200`) a credencial              |
-| GET    | `/integrations/{id}/credential`         | Lê os metadados da credencial (nunca o segredo)             |
-| DELETE | `/integrations/{id}/credential`         | Remove a credencial                                         |
+| GET    | `/integrations`                         | Lista integrações, **paginada**, `?name=` (parcial, case-insensitive) e `?status=` opcionais |
+| GET    | `/integrations/{ref}`                   | Consulta uma integração                                     |
+| PATCH  | `/integrations/{ref}`                   | Atualização parcial (qualquer campo, inclusive `status` e `slug`) |
+| DELETE | `/integrations/{ref}`                   | Remove a integração e a credencial dela                     |
+| PUT    | `/integrations/{ref}/credential`        | Cria (`201`) ou substitui (`200`) a credencial              |
+| GET    | `/integrations/{ref}/credential`        | Lê os metadados da credencial (nunca o segredo)             |
+| DELETE | `/integrations/{ref}/credential`        | Remove a credencial                                         |
+
+`{ref}` é o id da integração (UUID) ou o slug dela.
 | GET    | `/health`                               | Liveness + conectividade com o banco (não exige API key)    |
 
 ### Paginação
@@ -183,6 +188,7 @@ POST /integrations
 {
   "id": "47f476e9-…",
   "name": "Payments API",
+  "slug": "payments-api",
   "base_url": "https://payments.example.com/v1",
   "auth_type": "API_KEY",
   "default_headers": { "Accept": "application/json" },
@@ -192,12 +198,12 @@ POST /integrations
 }
 ```
 
-A `base_url` voltou normalizada. Mandar de novo com o mesmo `name` → `409 Conflict`.
+A `base_url` voltou normalizada e o `slug` foi derivado do nome (passe `"slug": "…"` para escolher um). Mandar de novo com o mesmo `name` ou `slug` → `409 Conflict`, e a mensagem diz qual dos dois colidiu. Daqui em diante a integração pode ser referenciada como `payments-api` em vez do UUID.
 
 **2. Guardar a credencial**
 
 ```http
-PUT /integrations/47f476e9-…/credential
+PUT /integrations/payments-api/credential
 { "auth_type": "API_KEY", "header_name": "X-Api-Key", "api_key": "sk_live_example" }
 ```
 ```json
@@ -217,7 +223,7 @@ Para uma integração com bearer token o payload é `{ "auth_type": "BEARER_TOKE
 **3. Incompatibilidades são recusadas, não adivinhadas**
 
 ```http
-PUT /integrations/47f476e9-…/credential
+PUT /integrations/payments-api/credential
 { "auth_type": "BEARER_TOKEN", "token": "…" }
 ```
 ```json
@@ -229,7 +235,7 @@ Status `409`. O mesmo status volta ao tentar um `PATCH` no `auth_type` enquanto 
 **4. Pausar**
 
 ```http
-PATCH /integrations/47f476e9-…
+PATCH /integrations/payments-api
 { "status": "PAUSED" }
 ```
 
@@ -241,8 +247,8 @@ PATCH /integrations/47f476e9-…
 |--------|----------------------------------------------------------------------------------------------|
 | 401    | `X-API-Key` ausente ou inválida                                                              |
 | 404    | Integração ou credencial não encontrada                                                     |
-| 409    | Nome de integração duplicado · tipo da credencial ≠ `auth_type` · troca de `auth_type` com credencial presente |
-| 422    | Corpo da requisição falha na validação (`base_url` inválida, `Authorization` nos headers, payload errado) |
+| 409    | Nome ou slug de integração duplicado · tipo da credencial ≠ `auth_type` · troca de `auth_type` com credencial presente |
+| 422    | Corpo da requisição falha na validação (`base_url` ou `slug` inválidos, `Authorization` nos headers, payload errado) |
 | 503    | `/health`: banco inacessível                                                                 |
 
 **Segredos.** Os segredos das credenciais são criptografados com Fernet (AES-128-CBC + HMAC, da biblioteca `cryptography`) usando `CREDENTIAL_ENCRYPTION_KEY`. Os campos de segredo são tipados como `SecretStr` nos schemas, então até um `repr` acidental imprime `**********`. A suíte de testes afirma que o texto puro está ausente dos bytes no banco, de toda resposta da API e de todo registro de log. **Limitação documentada:** a chave vive numa variável de ambiente no container da API. Para um MVP de portfólio está bom; um deploy em produção buscaria a chave num gerenciador de segredos (AWS KMS, Vault, Azure Key Vault) com rotação e auditoria de acesso. O `.env` está no `.gitignore`.
@@ -289,16 +295,16 @@ As tabelas são criadas a partir dos models no início da sessão e todas são l
 ruff check . && ruff format --check .
 ```
 
-Cobertura atual (33 testes): exigência da API key, health check do banco (incluindo o caso inacessível, afirmando que nada vaza), CRUD de integrações com validação, normalização, paginação, filtro e casos `409`, e credenciais — criptografia em repouso, segredo ausente de respostas e logs, regras de incompatibilidade de tipo, cascade no delete.
+Cobertura atual (50 testes): exigência da API key, health check do banco (incluindo o caso inacessível, afirmando que nada vaza), CRUD de integrações com validação, derivação e busca por slug, busca por nome, normalização, paginação, filtro e casos `409`, e credenciais — criptografia em repouso, segredo ausente de respostas e logs, regras de incompatibilidade de tipo, cascade no delete.
 
 ## Roadmap
 
 Sendo construído incrementalmente, nesta ordem:
 
-1. ~~Fundação do projeto~~ · ~~CRUD de integrações~~ · ~~Credenciais criptografadas~~
-2. **Execução de requisições** — `POST /integrations/{id}/execute` com método, path, headers, query e corpo JSON; a credencial é aplicada no servidor; timeouts, erros de conexão, respostas não-2xx e payloads inválidos são classificados, não só relançados
+1. ~~Fundação do projeto~~ · ~~CRUD de integrações~~ · ~~Credenciais criptografadas~~ · ~~Busca por slug e por nome~~
+2. **Execução de requisições** — `POST /integrations/{ref}/execute` com método, path, headers, query e corpo JSON; a credencial é aplicada no servidor; timeouts, erros de conexão, respostas não-2xx e payloads inválidos são classificados, não só relançados
 3. **Histórico de execuções** — cada execução registrada com método, path, status code, duração, resultado e mensagem de erro; consultável por integração
-4. **Health check** — `POST /integrations/{id}/health-check` distinguindo *inacessível*, *timeout*, *erro de autenticação*, *erro HTTP* e *resposta inesperada*
+4. **Health check** — `POST /integrations/{ref}/health-check` distinguindo *inacessível*, *timeout*, *erro de autenticação*, *erro HTTP* e *resposta inesperada*
 5. **OAuth 2.0 client credentials** — endpoint de token, cache de token criptografado com renovação por expiração
 6. **Request-id nos logs**, **CI com GitHub Actions** (Postgres como service container, ruff, `alembic check`, pytest)
 
