@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.api import integrations
 from app.api.deps import DbSession
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import configure_logging
@@ -17,6 +18,8 @@ app = FastAPI(
     description="Centralize, execute and troubleshoot integrations with external REST APIs.",
     version="0.1.0",
 )
+
+app.include_router(integrations.router)
 
 
 @app.exception_handler(NotFoundError)
