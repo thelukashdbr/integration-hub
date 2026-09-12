@@ -1,9 +1,19 @@
+import re
+import unicodedata
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 from app.db.models import AuthType, IntegrationStatus
+
+SLUG_PATTERN = r"^[a-z0-9]+(-[a-z0-9]+)*$"
+
+
+def slugify(name: str) -> str:
+    # "Integração ERP (v2)" -> "integracao-erp-v2"
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
 
 
 def normalize_base_url(value: str) -> str:
@@ -22,6 +32,13 @@ def validate_headers(headers: dict[str, str]) -> dict[str, str]:
 
 class IntegrationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    slug: str | None = Field(
+        default=None,
+        pattern=SLUG_PATTERN,
+        max_length=100,
+        description="URL-safe identifier. Derived from name when omitted.",
+        examples=["payments-api"],
+    )
     description: str | None = None
     base_url: str = Field(max_length=2048, examples=["https://api.example.com/v1"])
     auth_type: AuthType
@@ -31,9 +48,18 @@ class IntegrationCreate(BaseModel):
     _normalize_base_url = field_validator("base_url")(normalize_base_url)
     _validate_headers = field_validator("default_headers")(validate_headers)
 
+    @model_validator(mode="after")
+    def _default_slug_from_name(self) -> "IntegrationCreate":
+        if self.slug is None:
+            self.slug = slugify(self.name)
+            if not self.slug:
+                raise ValueError("slug could not be derived from name; provide one explicitly")
+        return self
+
 
 class IntegrationUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
+    slug: str | None = Field(default=None, pattern=SLUG_PATTERN, max_length=100)
     description: str | None = None
     base_url: str | None = Field(default=None, max_length=2048)
     auth_type: AuthType | None = None
@@ -57,6 +83,7 @@ class IntegrationRead(BaseModel):
 
     id: uuid.UUID
     name: str
+    slug: str
     description: str | None
     base_url: str
     auth_type: AuthType

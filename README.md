@@ -13,7 +13,7 @@ This is a portfolio project, built incrementally. This README describes what exi
 The central concept is an **Integration**: an external API the hub knows how to talk to. Each integration has at most one **Credential**, which holds the secret needed to authenticate against that API.
 
 ```
-Integration        (name, base_url, auth_type, default_headers, timeout_seconds, status)
+Integration        (name, slug, base_url, auth_type, default_headers, timeout_seconds, status)
   └── Credential   (API_KEY | BEARER_TOKEN; config in plain JSONB, secret encrypted with Fernet)
 ```
 
@@ -53,13 +53,16 @@ integration-hub/
 
 **Operator status vs. observed health.** `Integration.status` (`ACTIVE`/`PAUSED`) is set by an operator and is never flipped by the system. Health-check results will live in their own fields when that feature lands, so "someone paused this" and "the last check failed" stay distinguishable.
 
+**Integrations are addressable by slug, not only by UUID.** Every `/integrations/{ref}` route accepts either the id or the slug (`GET /integrations/payments-api`). The slug is derived from the name on creation when not provided (`"Integração ERP (v2)"` → `integracao-erp-v2`), must match `^[a-z0-9]+(-[a-z0-9]+)*$` and is unique. The UUID stays the canonical key for foreign keys and logs; the slug exists so a person can type it.
+
 **Enums are stored as `VARCHAR`, not native Postgres `ENUM` types.** Adding a value (a new `auth_type`, for instance) then needs no `ALTER TYPE` migration, and the allowed values are already enforced by Pydantic at the API boundary.
 
 **The hub's own API requires a key.** Every route except `/health` requires an `X-API-Key` header matching `HUB_API_KEY`, compared in constant time. A service that stores credentials and will execute requests with them should not be open, even in an MVP.
 
 ## Features (current)
 
-- Create, list (paginated, filterable by status), get, update and delete integrations
+- Create, list (paginated, searchable by name, filterable by status), get, update and delete integrations
+- Address an integration by a human-friendly `slug` as well as by UUID
 - Validate and normalize `base_url` (http/https only, no query string or fragment, lowercase host, no trailing slash)
 - Reject `Authorization` in `default_headers` — that header belongs to the credential
 - Store one credential per integration (`API_KEY` or `BEARER_TOKEN`), encrypted at rest, never returned or logged
@@ -143,13 +146,15 @@ Full OpenAPI/Swagger at `/docs`. Summary:
 | Method | Path                                    | Description                                              |
 |--------|-----------------------------------------|----------------------------------------------------------|
 | POST   | `/integrations`                         | Create an integration                                    |
-| GET    | `/integrations`                         | List integrations, **paginated**, optional `?status=`    |
-| GET    | `/integrations/{id}`                    | Get an integration                                       |
-| PATCH  | `/integrations/{id}`                    | Partial update (any field, including `status`)           |
-| DELETE | `/integrations/{id}`                    | Delete an integration and its credential                 |
-| PUT    | `/integrations/{id}/credential`         | Create (`201`) or replace (`200`) the credential         |
-| GET    | `/integrations/{id}/credential`         | Read credential metadata (never the secret)              |
-| DELETE | `/integrations/{id}/credential`         | Delete the credential                                    |
+| GET    | `/integrations`                         | List integrations, **paginated**, optional `?name=` (partial, case-insensitive) and `?status=` |
+| GET    | `/integrations/{ref}`                   | Get an integration                                       |
+| PATCH  | `/integrations/{ref}`                   | Partial update (any field, including `status` and `slug`) |
+| DELETE | `/integrations/{ref}`                   | Delete an integration and its credential                 |
+| PUT    | `/integrations/{ref}/credential`        | Create (`201`) or replace (`200`) the credential         |
+| GET    | `/integrations/{ref}/credential`        | Read credential metadata (never the secret)              |
+| DELETE | `/integrations/{ref}/credential`        | Delete the credential                                    |
+
+`{ref}` is the integration id (UUID) or its slug.
 | GET    | `/health`                               | Liveness + database connectivity (no API key required)   |
 
 ### Pagination
@@ -183,6 +188,7 @@ POST /integrations
 {
   "id": "47f476e9-…",
   "name": "Payments API",
+  "slug": "payments-api",
   "base_url": "https://payments.example.com/v1",
   "auth_type": "API_KEY",
   "default_headers": { "Accept": "application/json" },
@@ -192,12 +198,12 @@ POST /integrations
 }
 ```
 
-`base_url` came back normalized. Sending it again with the same `name` → `409 Conflict`.
+`base_url` came back normalized and `slug` was derived from the name (pass `"slug": "…"` to choose one). Sending it again with the same `name` or `slug` → `409 Conflict`, and the message says which one collided. From here on the integration can be referenced as `payments-api` instead of the UUID.
 
 **2. Store its credential**
 
 ```http
-PUT /integrations/47f476e9-…/credential
+PUT /integrations/payments-api/credential
 { "auth_type": "API_KEY", "header_name": "X-Api-Key", "api_key": "sk_live_example" }
 ```
 ```json
@@ -217,7 +223,7 @@ For a bearer token integration the payload is `{ "auth_type": "BEARER_TOKEN", "t
 **3. Mismatches are refused, not guessed**
 
 ```http
-PUT /integrations/47f476e9-…/credential
+PUT /integrations/payments-api/credential
 { "auth_type": "BEARER_TOKEN", "token": "…" }
 ```
 ```json
@@ -229,7 +235,7 @@ Status `409`. The same status is returned when trying to `PATCH` `auth_type` whi
 **4. Pause it**
 
 ```http
-PATCH /integrations/47f476e9-…
+PATCH /integrations/payments-api
 { "status": "PAUSED" }
 ```
 
@@ -241,8 +247,8 @@ PATCH /integrations/47f476e9-…
 |--------|---------------------------------------------------------------------------------------------|
 | 401    | Missing or invalid `X-API-Key`                                                              |
 | 404    | Integration or credential not found                                                        |
-| 409    | Duplicate integration name · credential type ≠ `auth_type` · `auth_type` change with a credential present |
-| 422    | Request body fails validation (invalid `base_url`, `Authorization` in headers, bad payload)  |
+| 409    | Duplicate integration name or slug · credential type ≠ `auth_type` · `auth_type` change with a credential present |
+| 422    | Request body fails validation (invalid `base_url` or `slug`, `Authorization` in headers, bad payload) |
 | 503    | `/health`: database unreachable                                                             |
 
 **Secrets.** Credential secrets are encrypted with Fernet (AES-128-CBC + HMAC, from the `cryptography` library) using `CREDENTIAL_ENCRYPTION_KEY`. Secret fields are typed `SecretStr` in the schemas, so even an accidental `repr` prints `**********`. The test suite asserts that the plaintext is absent from the database bytes, from every API response and from every log record. **Documented limitation:** the key lives in an environment variable on the API container. That is fine for a portfolio MVP; a production deployment would source it from a secrets manager (AWS KMS, Vault, Azure Key Vault) with rotation and access auditing. `.env` is git-ignored.
@@ -289,16 +295,16 @@ Tables are created from the models at the start of the session and every table i
 ruff check . && ruff format --check .
 ```
 
-Current coverage (33 tests): API key enforcement, database health check (including the unreachable case, asserting nothing leaks), integration CRUD with validation, normalization, pagination, filtering and `409` cases, and credentials — encryption at rest, secret absent from responses and logs, type mismatch rules, cascade on delete.
+Current coverage (50 tests): API key enforcement, database health check (including the unreachable case, asserting nothing leaks), integration CRUD with validation, slug derivation and lookup, name search, normalization, pagination, filtering and `409` cases, and credentials — encryption at rest, secret absent from responses and logs, type mismatch rules, cascade on delete.
 
 ## Roadmap
 
 Being built incrementally, in this order:
 
-1. ~~Project foundation~~ · ~~Integrations CRUD~~ · ~~Encrypted credentials~~
-2. **Request execution** — `POST /integrations/{id}/execute` with method, path, headers, query and JSON body; the credential is applied server-side; timeouts, connection errors, non-2xx responses and invalid payloads are classified, not just re-raised
+1. ~~Project foundation~~ · ~~Integrations CRUD~~ · ~~Encrypted credentials~~ · ~~Slug lookup and name search~~
+2. **Request execution** — `POST /integrations/{ref}/execute` with method, path, headers, query and JSON body; the credential is applied server-side; timeouts, connection errors, non-2xx responses and invalid payloads are classified, not just re-raised
 3. **Execution history** — every execution recorded with method, path, status code, duration, outcome and error message; queryable per integration
-4. **Health check** — `POST /integrations/{id}/health-check` distinguishing *unreachable*, *timeout*, *authentication error*, *HTTP error* and *unexpected response*
+4. **Health check** — `POST /integrations/{ref}/health-check` distinguishing *unreachable*, *timeout*, *authentication error*, *HTTP error* and *unexpected response*
 5. **OAuth 2.0 client credentials** — token endpoint, encrypted token cache with expiry-based refresh
 6. **Request-id correlation in logs**, **GitHub Actions CI** (Postgres service container, ruff, `alembic check`, pytest)
 
