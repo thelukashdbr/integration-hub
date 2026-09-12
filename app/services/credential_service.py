@@ -24,8 +24,8 @@ def set_credential(
         raise ConflictError("Integration does not use authentication (auth_type is NONE)")
     if data.auth_type != integration.auth_type:
         raise ConflictError(
-            f"Integration expects a {integration.auth_type.value} credential, "
-            f"got {data.auth_type.value}"
+            f"Credential type {data.auth_type.value} does not match "
+            f"integration auth_type {integration.auth_type.value}"
         )
 
     config, secret = _split_secret(data)
